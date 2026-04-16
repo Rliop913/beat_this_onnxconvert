@@ -1,14 +1,18 @@
 from pathlib import Path
 
 import numpy as np
-import soundfile as sf
-import torch
+import pytest
+
+sf = pytest.importorskip("soundfile")
+torch = pytest.importorskip("torch")
+pytest.importorskip("einops")
+pytest.importorskip("rotary_embedding_torch")
 
 from beat_this.inference import Audio2Frames, File2Beats
 
 
 def test_File2Beat():
-    f2b = File2Beats()
+    f2b = File2Beats(checkpoint_path=None)
     audio_path = Path("tests/It Don't Mean A Thing - Kings of Swing.mp3")
     beat, downbeat = f2b(audio_path)
     assert isinstance(beat, np.ndarray)
@@ -16,7 +20,7 @@ def test_File2Beat():
 
 
 def test_Audio2Frames():
-    a2f = Audio2Frames()
+    a2f = Audio2Frames(checkpoint_path=None)
     audio_path = Path("tests/It Don't Mean A Thing - Kings of Swing.mp3")
     # load audio
     audio, sr = sf.read(audio_path)

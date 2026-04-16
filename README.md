@@ -78,6 +78,24 @@ save_beat_tsv(beats, downbeats, outpath)
 ```
 If you already have an audio tensor loaded, instead of `File2Beats`, use `Audio2Beats` and pass the tensor and its sample rate. We also provide `Audio2Frames` for framewise logits and `Spect2Frames` for spectrogram inputs.
 
+### ONNX export
+
+The repository also provides a model-only ONNX export script for ONNX Runtime 1.24.4. It exports the network body with the contract `spect[1, T, 128] -> logits[1, T, 2]`.
+The export dependencies require Python 3.11 or later.
+
+The export script does not download checkpoints. Copy the checkpoint you want to export to the repo-local `checkpoints/` directory first, for example:
+```bash
+checkpoints/beat_this-final0.ckpt
+```
+Then run:
+```bash
+python launch_scripts/export_onnx_model.py --checkpoint final0
+```
+The default output path is:
+```bash
+re-impl/models/beat_this_model_final0.onnx
+```
+
 
 ## Available models
 
