@@ -1,0 +1,9 @@
+[requires]
+onnxruntime/1.24.4
+
+[generators]
+CMakeDeps
+CMakeToolchain
+
+[options]
+onnx/*:disable_static_registration=True

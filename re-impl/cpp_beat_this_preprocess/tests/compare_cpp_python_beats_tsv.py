@@ -25,14 +25,14 @@ if str(REPO_ROOT) not in sys.path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare end-to-end Python logits against the C++ ONNX Runtime runner."
+        description="Compare Python final .beats TSV export against the C++ port."
     )
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--cpp-exe", required=True)
     parser.add_argument("--artifact-dir", required=True)
-    parser.add_argument("--atol", type=float, default=1e-3)
-    parser.add_argument("--rtol", type=float, default=1e-3)
+    parser.add_argument("--atol", type=float, default=1e-9)
+    parser.add_argument("--rtol", type=float, default=1e-9)
     return parser.parse_args()
 
 
@@ -74,40 +74,41 @@ def write_waveform_binary(path: Path, waveform: np.ndarray) -> None:
     waveform.reshape(-1).astype("<f4").tofile(path)
 
 
-def write_reference_tsv(path: Path, beat: np.ndarray, downbeat: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    frame = np.arange(beat.shape[0], dtype=np.int64)
-    stacked = np.column_stack((frame, beat, downbeat))
-    np.savetxt(
-        path,
-        stacked,
-        fmt=["%d", "%.9g", "%.9g"],
-        delimiter="\t",
-        header="frame\tbeat\tdownbeat",
-        comments="",
-    )
+def load_beats_tsv(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    times: list[float] = []
+    numbers: list[int] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        time_text, number_text = stripped.split("\t")
+        times.append(float(time_text))
+        numbers.append(int(number_text))
+    return np.asarray(times, dtype=np.float64), np.asarray(numbers, dtype=np.int64)
 
 
-def load_cpp_tsv(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    values = np.loadtxt(path, delimiter="\t", skiprows=1)
-    if values.ndim == 1:
-        values = values.reshape(1, -1)
-    return values[:, 1].astype(np.float32), values[:, 2].astype(np.float32)
+def max_abs_error(lhs: np.ndarray, rhs: np.ndarray) -> float:
+    if lhs.size == 0 and rhs.size == 0:
+        return 0.0
+    return float(np.max(np.abs(lhs - rhs)))
 
 
 def main() -> int:
     if np is None or torch is None:
         print(
-            "Skipping parity check because numpy or torch is unavailable in the selected Python.",
+            "Skipping beats TSV parity check because numpy or torch is unavailable in the selected Python.",
             file=sys.stderr,
         )
         return 125
 
     try:
-        from beat_this.inference import Audio2Frames
+        from beat_this.inference import Audio2Beats
+        from beat_this.utils import save_beat_tsv
     except ModuleNotFoundError as error:
-        print(f"Skipping parity check because Python inference dependencies are missing: {error}",
-              file=sys.stderr)
+        print(
+            f"Skipping beats TSV parity check because Python inference dependencies are missing: {error}",
+            file=sys.stderr,
+        )
         return 125
 
     args = parse_args()
@@ -123,7 +124,7 @@ def main() -> int:
     if not model_path.exists():
         raise FileNotFoundError(f"onnx model not found: {model_path}")
     if not cpp_exe.exists():
-        raise FileNotFoundError(f"cpp logits dump executable not found: {cpp_exe}")
+        raise FileNotFoundError(f"cpp beats tsv dump executable not found: {cpp_exe}")
 
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -136,18 +137,23 @@ def main() -> int:
 
     waveform, sample_rate = make_deterministic_waveform()
     waveform_bin = artifact_dir / "waveform_interleaved_f32.bin"
-    cpp_tsv = artifact_dir / "cpp_logits.tsv"
-    py_tsv = artifact_dir / "python_logits.tsv"
-    summary_json = artifact_dir / "parity_summary.json"
+    cpp_tsv = artifact_dir / "cpp_beats.beats"
+    py_tsv = artifact_dir / "python_beats.beats"
+    summary_json = artifact_dir / "beats_tsv_parity_summary.json"
 
     write_waveform_binary(waveform_bin, waveform)
 
-    runner = Audio2Frames(checkpoint_path=str(checkpoint_path), device="cpu", float16=False)
+    runner = Audio2Beats(
+        checkpoint_path=str(checkpoint_path),
+        device="cpu",
+        float16=False,
+        dbn=False,
+    )
     with torch.inference_mode():
         beat_ref, downbeat_ref = runner(waveform, sample_rate)
-    beat_ref_np = beat_ref.cpu().numpy().astype(np.float32)
-    downbeat_ref_np = downbeat_ref.cpu().numpy().astype(np.float32)
-    write_reference_tsv(py_tsv, beat_ref_np, downbeat_ref_np)
+    beat_ref_np = np.asarray(beat_ref, dtype=np.float64)
+    downbeat_ref_np = np.asarray(downbeat_ref, dtype=np.float64)
+    save_beat_tsv(beat_ref_np, downbeat_ref_np, py_tsv)
 
     command = [
         str(cpp_exe),
@@ -171,33 +177,32 @@ def main() -> int:
     )
     if completed.returncode != 0:
         raise RuntimeError(
-            "cpp logits dump failed\n"
+            "cpp beats tsv dump failed\n"
             f"stdout:\n{completed.stdout}\n"
             f"stderr:\n{completed.stderr}"
         )
 
-    beat_cpp, downbeat_cpp = load_cpp_tsv(cpp_tsv)
-    if beat_cpp.shape[0] != beat_ref_np.shape[0]:
+    beat_cpp, numbers_cpp = load_beats_tsv(cpp_tsv)
+    beat_ref_loaded, numbers_ref = load_beats_tsv(py_tsv)
+
+    if beat_cpp.shape[0] != beat_ref_loaded.shape[0]:
         raise AssertionError(
-            f"frame count mismatch: cpp={beat_cpp.shape[0]} python={beat_ref_np.shape[0]}"
+            f"beat count mismatch: cpp={beat_cpp.shape[0]} python={beat_ref_loaded.shape[0]}"
         )
 
-    np.testing.assert_allclose(beat_cpp, beat_ref_np, atol=args.atol, rtol=args.rtol)
-    np.testing.assert_allclose(
-        downbeat_cpp, downbeat_ref_np, atol=args.atol, rtol=args.rtol
-    )
+    np.testing.assert_allclose(beat_cpp, beat_ref_loaded, atol=args.atol, rtol=args.rtol)
+    np.testing.assert_array_equal(numbers_cpp, numbers_ref)
 
     summary = {
-        "num_frames": int(beat_cpp.shape[0]),
+        "num_beats": int(beat_cpp.shape[0]),
+        "num_downbeats": int(np.count_nonzero(numbers_cpp == 1)),
         "atol": args.atol,
         "rtol": args.rtol,
-        "beat_max_abs_error": float(np.max(np.abs(beat_cpp - beat_ref_np))),
-        "beat_mean_abs_error": float(np.mean(np.abs(beat_cpp - beat_ref_np))),
-        "downbeat_max_abs_error": float(np.max(np.abs(downbeat_cpp - downbeat_ref_np))),
-        "downbeat_mean_abs_error": float(np.mean(np.abs(downbeat_cpp - downbeat_ref_np))),
-        "waveform_path": str(waveform_bin),
-        "cpp_logits_path": str(cpp_tsv),
-        "python_logits_path": str(py_tsv),
+        "beat_time_max_abs_error": max_abs_error(beat_cpp, beat_ref_loaded),
+        "cpp_beats_path": str(cpp_tsv),
+        "python_beats_path": str(py_tsv),
+        "text_identical": cpp_tsv.read_text(encoding="utf-8")
+        == py_tsv.read_text(encoding="utf-8"),
     }
     summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))

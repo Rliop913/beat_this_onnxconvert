@@ -3,8 +3,10 @@
 #include "internal/aggregate.hpp"
 #include "internal/split.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <numbers>
 #include <span>
@@ -15,13 +17,19 @@
 namespace {
 
 using beat_this::inference::BeatThisOnnxRunner;
+using beat_this::inference::BeatTimestamps;
 using beat_this::inference::FrameLogits;
+using beat_this::inference::InferBeatNumbers;
+using beat_this::inference::MinimalBeatPostprocessor;
+using beat_this::inference::WriteBeatTsv;
 using beat_this::inference::internal::AggregateChunkLogits;
 using beat_this::inference::internal::ChunkFrameLogits;
 using beat_this::inference::internal::SplitSpectrogram;
 using beat_this::preprocess::AudioBufferView;
 using beat_this::preprocess::ChannelLayout;
 using beat_this::preprocess::Spectrogram;
+
+constexpr double kDefaultFps = 50.0;
 
 void Require(const bool condition, const std::string& message) {
   if (!condition) {
@@ -59,6 +67,51 @@ void RequireAllFinite(const FrameLogits& logits, const std::string& message) {
   for (const float value : logits.downbeat) {
     Require(std::isfinite(value), message + ": non-finite downbeat logit");
   }
+}
+
+void RequireNear(const double actual,
+                 const double expected,
+                 const double tolerance,
+                 const std::string& message) {
+  Require(std::abs(actual - expected) <= tolerance, message);
+}
+
+void RequireTimesEqual(const std::span<const double> actual,
+                       const std::span<const double> expected,
+                       const std::string& message) {
+  Require(actual.size() == expected.size(), message + ": size mismatch");
+  for (std::size_t index = 0; index < actual.size(); ++index) {
+    RequireNear(actual[index], expected[index], 1e-12, message + ": value mismatch");
+  }
+}
+
+void RequireNumbersEqual(const std::span<const int> actual,
+                         const std::span<const int> expected,
+                         const std::string& message) {
+  Require(actual.size() == expected.size(), message + ": size mismatch");
+  for (std::size_t index = 0; index < actual.size(); ++index) {
+    Require(actual[index] == expected[index], message + ": value mismatch");
+  }
+}
+
+void RequireTimestampsEqual(const BeatTimestamps& actual,
+                            const BeatTimestamps& expected,
+                            const std::string& message) {
+  RequireTimesEqual(actual.beats, expected.beats, message + ": beats");
+  RequireTimesEqual(actual.downbeats, expected.downbeats, message + ": downbeats");
+}
+
+std::vector<std::string> ReadNonEmptyLines(const std::filesystem::path& path) {
+  std::ifstream input(path);
+  Require(static_cast<bool>(input), "failed to open beats tsv");
+
+  std::vector<std::string> lines;
+  for (std::string line; std::getline(input, line);) {
+    if (!line.empty()) {
+      lines.push_back(line);
+    }
+  }
+  return lines;
 }
 
 Spectrogram MakeDeterministicSpectrogram(const int num_frames) {
@@ -184,6 +237,119 @@ void TestMissingModelThrowsRuntime() {
       "missing onnx model should throw runtime_error");
 }
 
+void TestMinimalPostprocessorPreservesFractionalBeatCenters() {
+  MinimalBeatPostprocessor postprocessor;
+  FrameLogits logits{
+      .num_frames = 32,
+      .beat = std::vector<float>(32U, -1.0F),
+      .downbeat = std::vector<float>(32U, -1.0F),
+  };
+  logits.beat[10] = 2.0F;
+  logits.beat[11] = 2.0F;
+  logits.beat[18] = 0.0F;
+  logits.beat[24] = 0.25F;
+
+  const BeatTimestamps timestamps = postprocessor.Process(logits);
+  Require(timestamps.downbeats.empty(), "fractional center test should not emit downbeats");
+  Require(timestamps.beats.size() == 2U, "fractional center test beat count mismatch");
+  RequireNear(timestamps.beats[0], 10.5 / kDefaultFps, 1e-12,
+              "adjacent beat peaks should preserve fractional frame center");
+  RequireNear(timestamps.beats[1], 24.0 / kDefaultFps, 1e-12,
+              "positive isolated beat peak should survive minimal postprocessing");
+}
+
+void TestMinimalPostprocessorSnapsAndDeduplicatesDownbeats() {
+  MinimalBeatPostprocessor postprocessor;
+  FrameLogits logits{
+      .num_frames = 24,
+      .beat = std::vector<float>(24U, -1.0F),
+      .downbeat = std::vector<float>(24U, -1.0F),
+  };
+  logits.beat[5] = 2.0F;
+  logits.beat[15] = 2.0F;
+
+  logits.downbeat[4] = 3.0F;
+  logits.downbeat[6] = 3.0F;
+  logits.downbeat[16] = 3.0F;
+
+  const BeatTimestamps timestamps = postprocessor.Process(logits);
+  const std::vector<double> expected_beats = {5.0 / kDefaultFps, 15.0 / kDefaultFps};
+  const std::vector<double> expected_downbeats = {5.0 / kDefaultFps, 15.0 / kDefaultFps};
+  RequireTimesEqual(timestamps.beats, expected_beats,
+                    "snapping test beat times");
+  RequireTimesEqual(timestamps.downbeats, expected_downbeats,
+                    "snapping test downbeat times");
+}
+
+void TestMinimalPostprocessorRejectsMalformedLogits() {
+  const MinimalBeatPostprocessor postprocessor;
+  const FrameLogits malformed{
+      .num_frames = 4,
+      .beat = std::vector<float>(3U, 0.0F),
+      .downbeat = std::vector<float>(4U, 0.0F),
+  };
+  RequireThrowsInvalid(
+      [&]() {
+        static_cast<void>(postprocessor.Process(malformed));
+      },
+      "minimal postprocessor should reject malformed frame logits");
+}
+
+void TestInferBeatNumbersHandlesPickupMeasure() {
+  const BeatTimestamps timestamps{
+      .beats = {0.5, 1.0, 1.5, 2.0, 2.5, 3.0},
+      .downbeats = {1.5, 3.0},
+  };
+  const std::vector<int> expected = {2, 3, 1, 2, 3, 1};
+  const std::vector<int> actual = InferBeatNumbers(timestamps);
+  RequireNumbersEqual(actual, expected, "pickup measure beat number inference");
+}
+
+void TestInferBeatNumbersFallsBackWithoutDownbeats() {
+  const BeatTimestamps timestamps{
+      .beats = {0.5, 1.0, 1.5},
+      .downbeats = {},
+  };
+  const std::vector<int> expected = {2, 3, 4};
+  const std::vector<int> actual = InferBeatNumbers(timestamps);
+  RequireNumbersEqual(actual, expected, "fallback beat number inference");
+}
+
+void TestInferBeatNumbersRejectsMissingBeatDownbeats() {
+  const BeatTimestamps timestamps{
+      .beats = {0.5, 1.0},
+      .downbeats = {0.75},
+  };
+  RequireThrowsInvalid(
+      [&]() {
+        static_cast<void>(InferBeatNumbers(timestamps));
+      },
+      "beat number inference should reject downbeats that are not beats");
+}
+
+void TestWriteBeatTsvProducesPythonFormat() {
+  const BeatTimestamps timestamps{
+      .beats = {0.5, 1.0, 1.5, 2.0, 2.5, 3.0},
+      .downbeats = {1.5, 3.0},
+  };
+  const std::filesystem::path output_path =
+      std::filesystem::path("test-artifacts") / "unit-test.beats";
+
+  std::filesystem::remove(output_path);
+  WriteBeatTsv(timestamps, output_path);
+
+  const std::vector<std::string> expected = {
+      "0.5\t2",
+      "1.0\t3",
+      "1.5\t1",
+      "2.0\t2",
+      "2.5\t3",
+      "3.0\t1",
+  };
+  const std::vector<std::string> actual = ReadNonEmptyLines(output_path);
+  Require(actual == expected, "beat tsv writer should match python line format");
+}
+
 void TestRunnerProcessSpectrogram(const std::filesystem::path& model_path) {
   BeatThisOnnxRunner runner(model_path);
   const Spectrogram spectrogram = MakeDeterministicSpectrogram(1700);
@@ -197,6 +363,10 @@ void TestRunnerProcessSpectrogram(const std::filesystem::path& model_path) {
   Require(first.beat == second.beat, "runner should be deterministic for beat logits");
   Require(first.downbeat == second.downbeat, "runner should be deterministic for downbeat logits");
   RequireAllFinite(first, "runner spectrogram logits");
+
+  const BeatTimestamps manual = MinimalBeatPostprocessor().Process(first);
+  const BeatTimestamps convenience = runner.ProcessSpectrogramToBeats(spectrogram);
+  RequireTimestampsEqual(convenience, manual, "runner spectrogram convenience beats");
 }
 
 void TestRunnerRejectsInvalidSpectrogram(const std::filesystem::path& model_path) {
@@ -216,15 +386,21 @@ void TestRunnerRejectsInvalidSpectrogram(const std::filesystem::path& model_path
 void TestRunnerProcessWaveform(const std::filesystem::path& model_path) {
   BeatThisOnnxRunner runner(model_path);
   const std::vector<float> waveform = MakeStereoWaveform(44100, 32.0F);
-  const FrameLogits logits = runner.ProcessWaveform(AudioBufferView{
+  const AudioBufferView audio{
       .samples = std::span<const float>(waveform),
       .sample_rate = 44100,
       .num_channels = 2,
       .layout = ChannelLayout::kInterleavedFrames,
-  });
+  };
+  const FrameLogits logits = runner.ProcessWaveform(audio);
 
   Require(logits.num_frames > 1500, "waveform integration path should exercise chunk splitting");
   RequireAllFinite(logits, "runner waveform logits");
+
+  const BeatTimestamps manual = MinimalBeatPostprocessor().Process(logits);
+  const BeatTimestamps convenience = runner.ProcessWaveformToBeats(audio);
+  Require(!convenience.beats.empty(), "runner waveform convenience beats should not be empty");
+  RequireTimestampsEqual(convenience, manual, "runner waveform convenience beats");
 }
 
 void TestRunnerProcessFile(const std::filesystem::path& model_path,
@@ -233,6 +409,11 @@ void TestRunnerProcessFile(const std::filesystem::path& model_path,
   const FrameLogits logits = runner.ProcessFile(audio_path);
   Require(logits.num_frames > 0, "file integration path should produce logits");
   RequireAllFinite(logits, "runner file logits");
+
+  const BeatTimestamps manual = MinimalBeatPostprocessor().Process(logits);
+  const BeatTimestamps convenience = runner.ProcessFileToBeats(audio_path);
+  Require(!convenience.beats.empty(), "runner file convenience beats should not be empty");
+  RequireTimestampsEqual(convenience, manual, "runner file convenience beats");
 }
 
 }  // namespace
@@ -243,6 +424,13 @@ int main(int argc, char** argv) {
     TestSplitLongSpectrogram();
     TestAggregateKeepFirstSemantics();
     TestMissingModelThrowsRuntime();
+    TestMinimalPostprocessorPreservesFractionalBeatCenters();
+    TestMinimalPostprocessorSnapsAndDeduplicatesDownbeats();
+    TestMinimalPostprocessorRejectsMalformedLogits();
+    TestInferBeatNumbersHandlesPickupMeasure();
+    TestInferBeatNumbersFallsBackWithoutDownbeats();
+    TestInferBeatNumbersRejectsMissingBeatDownbeats();
+    TestWriteBeatTsvProducesPythonFormat();
 
     if (argc >= 2) {
       TestRunnerProcessSpectrogram(argv[1]);

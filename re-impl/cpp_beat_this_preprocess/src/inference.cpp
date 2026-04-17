@@ -77,4 +77,18 @@ FrameLogits BeatThisOnnxRunner::ProcessFile(const std::filesystem::path& path) c
   return ProcessSpectrogram(spectrogram);
 }
 
+BeatTimestamps BeatThisOnnxRunner::ProcessSpectrogramToBeats(
+    const beat_this::preprocess::Spectrogram& spectrogram) const {
+  return MinimalBeatPostprocessor().Process(ProcessSpectrogram(spectrogram));
+}
+
+BeatTimestamps BeatThisOnnxRunner::ProcessWaveformToBeats(
+    const beat_this::preprocess::AudioBufferView audio) const {
+  return MinimalBeatPostprocessor().Process(ProcessWaveform(audio));
+}
+
+BeatTimestamps BeatThisOnnxRunner::ProcessFileToBeats(const std::filesystem::path& path) const {
+  return MinimalBeatPostprocessor().Process(ProcessFile(path));
+}
+
 }  // namespace beat_this::inference

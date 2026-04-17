@@ -98,6 +98,7 @@ add_library(
   src/internal/onnx_session.cpp
   src/internal/split.cpp
   src/inference.cpp
+  src/postprocessor.cpp
 )
 
 target_include_directories(
@@ -131,6 +132,20 @@ add_executable(
 
 target_link_libraries(beat_this_logits_dump PRIVATE beat_this_inference_cpp)
 
+add_executable(
+  beat_this_beats_dump
+  tests/beats_dump_main.cpp
+)
+
+target_link_libraries(beat_this_beats_dump PRIVATE beat_this_inference_cpp)
+
+add_executable(
+  beat_this_beats_tsv_dump
+  tests/beats_tsv_dump_main.cpp
+)
+
+target_link_libraries(beat_this_beats_tsv_dump PRIVATE beat_this_inference_cpp)
+
 set(TEST_AUDIO "${REPO_ROOT}/tests/It Don't Mean A Thing - Kings of Swing.mp3")
 set(TEST_MODEL "${REPO_ROOT}/re-impl/models/beat_this_model_final0.onnx")
 
@@ -156,12 +171,23 @@ elseif(EXISTS "${REPO_ROOT}/beat_this-final0.ckpt")
 endif()
 
 set(_PYTHON_HINTS)
-if(EXISTS "${REPO_ROOT}/.venv/Scripts/python.exe")
-  set(_PYTHON_HINTS "${REPO_ROOT}/.venv")
+if(EXISTS "${REPO_ROOT}/.venv")
+  list(APPEND _PYTHON_HINTS
+    "${REPO_ROOT}/.venv"
+    "${REPO_ROOT}/.venv/bin"
+    "${REPO_ROOT}/.venv/Scripts"
+  )
+endif()
+if(EXISTS "${REPO_ROOT}/.venv/bin/python")
+  set(Python3_EXECUTABLE "${REPO_ROOT}/.venv/bin/python" CACHE FILEPATH
+      "Python interpreter for parity tests" FORCE)
+elseif(EXISTS "${REPO_ROOT}/.venv/Scripts/python.exe")
+  set(Python3_EXECUTABLE "${REPO_ROOT}/.venv/Scripts/python.exe" CACHE FILEPATH
+      "Python interpreter for parity tests" FORCE)
 endif()
 find_package(Python3 COMPONENTS Interpreter QUIET HINTS ${_PYTHON_HINTS})
 
-if(Python3_Interpreter_FOUND AND EXISTS "${TEST_MODEL}" AND TEST_CHECKPOINT)
+if(Python3_EXECUTABLE AND EXISTS "${TEST_MODEL}" AND TEST_CHECKPOINT)
   add_test(
     NAME beat_this_python_logits_parity
     COMMAND
@@ -176,6 +202,41 @@ if(Python3_Interpreter_FOUND AND EXISTS "${TEST_MODEL}" AND TEST_CHECKPOINT)
     beat_this_python_logits_parity
     PROPERTIES
       WORKING_DIRECTORY "${REPO_ROOT}"
+      SKIP_RETURN_CODE 125
+  )
+
+  add_test(
+    NAME beat_this_python_minimal_beats_parity
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_cpp_python_minimal_beats.py"
+      --checkpoint "${TEST_CHECKPOINT}"
+      --model "${TEST_MODEL}"
+      --cpp-exe "$<TARGET_FILE:beat_this_beats_dump>"
+      --artifact-dir "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts"
+  )
+  set_tests_properties(
+    beat_this_python_minimal_beats_parity
+    PROPERTIES
+      WORKING_DIRECTORY "${REPO_ROOT}"
+      SKIP_RETURN_CODE 125
+  )
+
+  add_test(
+    NAME beat_this_python_beats_tsv_parity
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_cpp_python_beats_tsv.py"
+      --checkpoint "${TEST_CHECKPOINT}"
+      --model "${TEST_MODEL}"
+      --cpp-exe "$<TARGET_FILE:beat_this_beats_tsv_dump>"
+      --artifact-dir "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts"
+  )
+  set_tests_properties(
+    beat_this_python_beats_tsv_parity
+    PROPERTIES
+      WORKING_DIRECTORY "${REPO_ROOT}"
+      SKIP_RETURN_CODE 125
   )
 else()
   message(STATUS "Skipping beat_this_python_logits_parity registration because Python3, the ONNX model, or the checkpoint is unavailable.")
