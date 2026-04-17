@@ -153,6 +153,8 @@ def main() -> int:
         str(cpp_exe),
         "--model",
         str(model_path),
+        "--format",
+        "logits",
         "--waveform-bin",
         str(waveform_bin),
         "--sample-rate",
@@ -171,7 +173,7 @@ def main() -> int:
     )
     if completed.returncode != 0:
         raise RuntimeError(
-            "cpp logits dump failed\n"
+            "cpp dump tool failed for logits format\n"
             f"stdout:\n{completed.stdout}\n"
             f"stderr:\n{completed.stderr}"
         )

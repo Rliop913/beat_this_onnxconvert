@@ -1,4 +1,4 @@
-#include "beat_this_inference/inference.hpp"
+#include "beat_this_inference/export.hpp"
 
 #include "internal/common.hpp"
 

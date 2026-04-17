@@ -16,27 +16,6 @@ struct FrameLogits {
   [[nodiscard]] bool empty() const noexcept { return num_frames == 0; }
 };
 
-struct BeatTimestamps {
-  std::vector<double> beats;
-  std::vector<double> downbeats;
-
-  [[nodiscard]] bool empty() const noexcept { return beats.empty() && downbeats.empty(); }
-};
-
-class MinimalBeatPostprocessor {
- public:
-  explicit MinimalBeatPostprocessor(double fps = 50.0);
-
-  [[nodiscard]] BeatTimestamps Process(const FrameLogits& logits) const;
-  [[nodiscard]] double fps() const noexcept { return fps_; }
-
- private:
-  double fps_ = 50.0;
-};
-
-[[nodiscard]] std::vector<int> InferBeatNumbers(const BeatTimestamps& timestamps);
-void WriteBeatTsv(const BeatTimestamps& timestamps, const std::filesystem::path& output_path);
-
 class BeatThisOnnxRunner {
  public:
   explicit BeatThisOnnxRunner(std::filesystem::path model_path);
@@ -53,11 +32,6 @@ class BeatThisOnnxRunner {
   [[nodiscard]] FrameLogits ProcessWaveform(
       beat_this::preprocess::AudioBufferView audio) const;
   [[nodiscard]] FrameLogits ProcessFile(const std::filesystem::path& path) const;
-  [[nodiscard]] BeatTimestamps ProcessSpectrogramToBeats(
-      const beat_this::preprocess::Spectrogram& spectrogram) const;
-  [[nodiscard]] BeatTimestamps ProcessWaveformToBeats(
-      beat_this::preprocess::AudioBufferView audio) const;
-  [[nodiscard]] BeatTimestamps ProcessFileToBeats(const std::filesystem::path& path) const;
 
  private:
   class Impl;

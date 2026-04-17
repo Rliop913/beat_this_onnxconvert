@@ -48,6 +48,7 @@ FetchContent_MakeAvailable(soxr_fork)
 
 add_library(
   beat_this_preprocess_cpp
+  "${REPO_ROOT}/cpp_root/include/stft_wrapper/ConfigurableSerialStft.cpp"
   src/internal/common.cpp
   src/internal/decode.cpp
   src/internal/frontend.cpp
@@ -126,25 +127,11 @@ target_link_libraries(beat_this_inference_tests PRIVATE beat_this_inference_cpp)
 target_include_directories(beat_this_inference_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 add_executable(
-  beat_this_logits_dump
-  tests/logits_dump_main.cpp
+  beat_this_dump
+  tools/beat_this_dump_main.cpp
 )
 
-target_link_libraries(beat_this_logits_dump PRIVATE beat_this_inference_cpp)
-
-add_executable(
-  beat_this_beats_dump
-  tests/beats_dump_main.cpp
-)
-
-target_link_libraries(beat_this_beats_dump PRIVATE beat_this_inference_cpp)
-
-add_executable(
-  beat_this_beats_tsv_dump
-  tests/beats_tsv_dump_main.cpp
-)
-
-target_link_libraries(beat_this_beats_tsv_dump PRIVATE beat_this_inference_cpp)
+target_link_libraries(beat_this_dump PRIVATE beat_this_inference_cpp)
 
 set(TEST_AUDIO "${REPO_ROOT}/tests/It Don't Mean A Thing - Kings of Swing.mp3")
 set(TEST_MODEL "${REPO_ROOT}/re-impl/models/beat_this_model_final0.onnx")
@@ -187,7 +174,28 @@ elseif(EXISTS "${REPO_ROOT}/.venv/Scripts/python.exe")
 endif()
 find_package(Python3 COMPONENTS Interpreter QUIET HINTS ${_PYTHON_HINTS})
 
+if(Python3_EXECUTABLE)
+  add_test(
+    NAME beat_this_python_spectrogram_parity
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_cpp_python_spectrogram.py"
+      --cpp-exe "$<TARGET_FILE:beat_this_dump>"
+      --artifact-dir "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts"
+  )
+  set_tests_properties(
+    beat_this_python_spectrogram_parity
+    PROPERTIES
+      WORKING_DIRECTORY "${REPO_ROOT}"
+      SKIP_RETURN_CODE 125
+  )
+
+else()
+  message(STATUS "Skipping beat_this_python_spectrogram_parity registration because Python3 is unavailable.")
+endif()
+
 if(Python3_EXECUTABLE AND EXISTS "${TEST_MODEL}" AND TEST_CHECKPOINT)
+
   add_test(
     NAME beat_this_python_logits_parity
     COMMAND
@@ -195,7 +203,7 @@ if(Python3_EXECUTABLE AND EXISTS "${TEST_MODEL}" AND TEST_CHECKPOINT)
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_cpp_python_logits.py"
       --checkpoint "${TEST_CHECKPOINT}"
       --model "${TEST_MODEL}"
-      --cpp-exe "$<TARGET_FILE:beat_this_logits_dump>"
+      --cpp-exe "$<TARGET_FILE:beat_this_dump>"
       --artifact-dir "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts"
   )
   set_tests_properties(
@@ -212,7 +220,7 @@ if(Python3_EXECUTABLE AND EXISTS "${TEST_MODEL}" AND TEST_CHECKPOINT)
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_cpp_python_minimal_beats.py"
       --checkpoint "${TEST_CHECKPOINT}"
       --model "${TEST_MODEL}"
-      --cpp-exe "$<TARGET_FILE:beat_this_beats_dump>"
+      --cpp-exe "$<TARGET_FILE:beat_this_dump>"
       --artifact-dir "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts"
   )
   set_tests_properties(
@@ -229,7 +237,7 @@ if(Python3_EXECUTABLE AND EXISTS "${TEST_MODEL}" AND TEST_CHECKPOINT)
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_cpp_python_beats_tsv.py"
       --checkpoint "${TEST_CHECKPOINT}"
       --model "${TEST_MODEL}"
-      --cpp-exe "$<TARGET_FILE:beat_this_beats_tsv_dump>"
+      --cpp-exe "$<TARGET_FILE:beat_this_dump>"
       --artifact-dir "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts"
   )
   set_tests_properties(

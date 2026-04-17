@@ -1,4 +1,6 @@
+#include "beat_this_inference/export.hpp"
 #include "beat_this_inference/inference.hpp"
+#include "beat_this_inference/postprocessor.hpp"
 #include "beat_this_preprocess/preprocessor.hpp"
 #include "internal/aggregate.hpp"
 #include "internal/split.hpp"
@@ -363,10 +365,7 @@ void TestRunnerProcessSpectrogram(const std::filesystem::path& model_path) {
   Require(first.beat == second.beat, "runner should be deterministic for beat logits");
   Require(first.downbeat == second.downbeat, "runner should be deterministic for downbeat logits");
   RequireAllFinite(first, "runner spectrogram logits");
-
-  const BeatTimestamps manual = MinimalBeatPostprocessor().Process(first);
-  const BeatTimestamps convenience = runner.ProcessSpectrogramToBeats(spectrogram);
-  RequireTimestampsEqual(convenience, manual, "runner spectrogram convenience beats");
+  static_cast<void>(MinimalBeatPostprocessor().Process(first));
 }
 
 void TestRunnerRejectsInvalidSpectrogram(const std::filesystem::path& model_path) {
@@ -396,11 +395,8 @@ void TestRunnerProcessWaveform(const std::filesystem::path& model_path) {
 
   Require(logits.num_frames > 1500, "waveform integration path should exercise chunk splitting");
   RequireAllFinite(logits, "runner waveform logits");
-
-  const BeatTimestamps manual = MinimalBeatPostprocessor().Process(logits);
-  const BeatTimestamps convenience = runner.ProcessWaveformToBeats(audio);
-  Require(!convenience.beats.empty(), "runner waveform convenience beats should not be empty");
-  RequireTimestampsEqual(convenience, manual, "runner waveform convenience beats");
+  const BeatTimestamps timestamps = MinimalBeatPostprocessor().Process(logits);
+  Require(!timestamps.beats.empty(), "runner waveform postprocessed beats should not be empty");
 }
 
 void TestRunnerProcessFile(const std::filesystem::path& model_path,
@@ -409,11 +405,8 @@ void TestRunnerProcessFile(const std::filesystem::path& model_path,
   const FrameLogits logits = runner.ProcessFile(audio_path);
   Require(logits.num_frames > 0, "file integration path should produce logits");
   RequireAllFinite(logits, "runner file logits");
-
-  const BeatTimestamps manual = MinimalBeatPostprocessor().Process(logits);
-  const BeatTimestamps convenience = runner.ProcessFileToBeats(audio_path);
-  Require(!convenience.beats.empty(), "runner file convenience beats should not be empty");
-  RequireTimestampsEqual(convenience, manual, "runner file convenience beats");
+  const BeatTimestamps timestamps = MinimalBeatPostprocessor().Process(logits);
+  Require(!timestamps.beats.empty(), "runner file postprocessed beats should not be empty");
 }
 
 }  // namespace
